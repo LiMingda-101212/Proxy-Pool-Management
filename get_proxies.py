@@ -380,7 +380,7 @@ def validate_existing_proxies():
     print(f"代理分数已更新，已移除 {initial_count - final_count} 个无效代理")
 
 def crawl_proxies():
-    """爬取免费代理"""
+    """爬取免费代理 - 仅供学习参考"""
     print("""已创建的可爬网站
     1：https://proxy5.net/cn/free-proxy/china   -被封了,但代理质量很高
     2：https://www.89ip.cn/   -240个,但大多数不能用
