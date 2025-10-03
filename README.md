@@ -23,6 +23,7 @@ Proxy,Port,Score
 
 建议将此程序放到proxies文件夹下,如果想放到其他地方,请修改'OUTPUT_FILE = "../proxies/valid_proxies.csv"'中的proxies为你的文件夹名称
 
+注意:爬虫部分仅供学习参考,请以网站要求为准
 
 en  -- English  --  英语
 
@@ -52,3 +53,5 @@ Proxy,Port,Score
 It is recommended to place this program in the 'proxies' folder. 
 
 If you want to place it elsewhere, please modify 'OUTPUT_FILE = "../proxies/valid_proxies.csv"' by changing 'proxies' to your folder name.
+
+Note: The web scraping part is for learning and reference purposes only; the website's requirements shall prevail.
