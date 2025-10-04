@@ -1,41 +1,22 @@
 # V 3.0
-"""
-zh-CN  --  Chinese  -- 简体中文
+'''
+支持http/https/socks4/socks5
+
 功能介绍:
 本程序用于代理管理,有以下几个功能:
-1.爬取和验证新代理,并将通过的代理添加到代理池文件(OUTPUT_FILE).为了使每个代理得到充分使用,本程序采取新代理验证两遍的策略,只要有一次通过即算通过,确保不会落下任何一个可用代理.
+1.爬取和验证新代理,并将通过的代理添加到代理池文件(OUTPUT_FILE).新代理使用自动检测类型.为了使每个代理得到充分使用,本程序采取新代理验证两遍的策略,只要有一次通过即算通过,确保不会落下任何一个可用代理.
     在验证之前会先将重复代理,错误代理筛除,确保不做无用功.满分100分,有效代理验证成功默认分数98分,超时代理80分,错误代理和无效代理0分(会被0分清除函数清除).
-2.检验和更新代理池内代理的有效性,再次验证成功加1分,超时代理分不变,无效代理和错误代理减1分,更直观的分辨代理的稳定性.
-3.提取指定数量的代理,优先提取分数高,稳定的代理
-4.查看代理池状态(总代理数量,代理的分数分布情况)
-5.从csv文件(ip,port格式)加载并验证代理,用于手动添加代理时使用
+2.检验和更新代理池内代理的有效性,使用代理池文件中的Type作为类型,再次验证成功加1分,超时代理分不变,无效代理和错误代理减1分,更直观的分辨代理的稳定性.
+3.提取指定数量的代理,优先提取分数高,稳定的代理,可指定提取类型
+4.查看代理池状态(总代理数量,各种类型代理的分数分布情况)
+5.从csv文件(ip,port格式)加载并验证代理,用于手动添加代理时使用,可以选择代理类型(这样比较快),也可用自动检测(若用自动检测可能较慢)
 
 代理池文件格式(OUTPUT_FILE) -> csv
-Proxy,Port,Score
-代理,端口,分数
+Type,Proxy:Port,Score
+类型,代理:端口,分数
 
 建议将此程序放到proxies文件夹下,如果想放到其他地方,请修改'OUTPUT_FILE = "../proxies/valid_proxies.csv"'中的proxies为你的文件夹名称
-
-
-en  -- English  --  英语
-Function Introduction:
-This program is used for proxy management and has the following functions:
-1. Crawl and verify new proxies, and add the verified proxies to the proxy pool file (OUTPUT_FILE).To ensure each proxy is fully utilized, 
-    this program adopts a strategy of verifying new proxies twice; as long as one verification passes, it is considered successful, ensuring that no usable proxy is missed.
-    Before verification, duplicate and erroneous proxies are filtered out to avoid unnecessary work. 
-    The full score is 100 points.Successfully verified valid proxies are given a default score of 98, timed-out proxies 80, 
-    and erroneous or invalid proxies 0 (which will be removed by the zero-score cleanup function).
-2. Check and update the validity of proxies in the proxy pool. Successfully re-verified proxies gain 1 point, timed-out proxies retain their score,
-    and invalid or erroneous proxies lose 1 point, which helps to intuitively assess proxy stability.
-3. Extract a specified number of proxies, prioritizing high-score and stable proxies.
-4. View the status of the proxy pool (total number of proxies, score distribution).
-5. Load and verify proxies from a CSV file (in IP, port format), useful for manually adding proxies.
-
-Proxy pool file format (OUTPUT_FILE) -> CSV
-Proxy,Port,Score
-It is recommended to place this program in the 'proxies' folder. 
-If you want to place it elsewhere, please modify 'OUTPUT_FILE = "../proxies/valid_proxies.csv"' by changing 'proxies' to your folder name.
-"""
+'''
 import re
 import requests
 import concurrent.futures
@@ -49,7 +30,7 @@ import socket
 OUTPUT_FILE = "../proxies/valid_proxies.csv"  # 输出有效代理文件（CSV格式）- Export valid proxy file (CSV format)
 TEST_URL = "http://httpbin.org/ip"  # 测试使用的URL - URL used for testing
 TIMEOUT = 6  # 超时时间(秒) - Timeout (s)
-MAX_WORKERS = 20  # 最大并发数 - Maximum concurrency
+MAX_WORKERS = 30  # 最大并发数 - Maximum concurrency
 MAX_SCORE = 100  # 最大积分 - Maximum score
 
 # 设置全局超时（包括DNS解析）
@@ -90,200 +71,234 @@ class ProxyScraper:
                 response.close()
                 return proxy_list
             else:
-                get_error = f"爬取失败，❌ 状态码{response.status_code}"
+                get_error = f"\n爬取失败，❌ 状态码{response.status_code}"   # 前面的\n防止与进度条混在一行
                 print(get_error)
                 return get_error
 
         except Exception as e:
-            get_error = f"爬取失败，❌ 错误: {str(e)}"
+            get_error = f"\n爬取失败，❌ 错误: {str(e)}"
             print(get_error)
             return get_error
 
-def check_proxy(proxy, test_url="http://httpbin.org/ip", timeout=TIMEOUT, retries=1):
+def check_proxy(proxy, test_url="http://httpbin.org/ip", timeout=TIMEOUT, 
+                retries=1, proxy_type="auto"):
     """
-    检查单个代理IP的可用性（支持重试）
-
+    检查单个代理IP的可用性（支持HTTP和SOCKS）
+    
+    :param proxy_type: 代理类型 - "auto"(自动检测), "http", "socks4", "socks5"
     :param proxy: 代理IP地址和端口 (格式: ip:port)
     :param test_url: 用于测试的URL
     :param timeout: 请求超时时间(秒)
     :param retries: 重试次数
-    :return: (代理地址, 是否可用, 响应时间)
+    :return: 代理地址, 是否可用, 响应时间, 代理类型
     """
-    proxies = {
-        "http": f"http://{proxy}",
-        "https": f"http://{proxy}"
-    }
+    # # 导入了但没有使用
+    # # 确保安装了socks支持
+    # try:
+    #     import socks
+    #     import socket
+    # except ImportError:
+    #     print("❌ 请安装SOCKS支持: pip install PySocks")
+    #     # 回退到HTTP-only模式
+    #     proxy_type = "http"
+    
+    # 根据代理类型设置proxies字典
+    if proxy_type == "auto":
+        # 自动检测：先尝试HTTP，再尝试SOCKS5，最后SOCKS4
+        protocols_to_try = ["http", "socks5", "socks4"]
+    else:
+        # 指定类型时，只尝试该类型
+        protocols_to_try = [proxy_type]
+    
+    detected_type = proxy_type if proxy_type != "auto" else "unknown"
+    
+    for current_protocol in protocols_to_try:
+        if current_protocol == "http":
+            proxies_config = {
+                "http": f"http://{proxy}",
+                "https": f"http://{proxy}"
+            }
+        elif current_protocol == "socks4":
+            proxies_config = {
+                "http": f"socks4://{proxy}",
+                "https": f"socks4://{proxy}"
+            }
+        elif current_protocol == "socks5":
+            proxies_config = {
+                "http": f"socks5://{proxy}",
+                "https": f"socks5://{proxy}"
+            }
+        else:
+            continue
 
-    for attempt in range(retries):
-        try:
-            start_time = time.time()
-            response = requests.get(
-                test_url,
-                proxies=proxies,
-                timeout=timeout,
-                allow_redirects=False  # 禁止重定向
-            )
-            end_time = time.time()
-            response_time = end_time - start_time
+        for attempt in range(retries):
+            try:
+                start_time = time.time()
+                response = requests.get(
+                    test_url,
+                    proxies=proxies_config,
+                    timeout=timeout,
+                    allow_redirects=False
+                )
+                end_time = time.time()
+                response_time = end_time - start_time
 
-            # 检查响应时间是否超过超时限制
-            if response_time > timeout:
-                return proxy, False, response_time
+                if response_time > timeout:
+                    # 超时，继续下一个协议（如果是自动检测）
+                    break
 
-            # 检查响应状态码和内容有效性
-            if response.status_code == 200:
-                # 验证返回的IP是否与代理一致（可选）
-                origin_ip = response.json().get('origin', '')
-                if proxy.split(':')[0] in origin_ip:
-                    return proxy, True, response_time
-                return proxy, True, response_time
-        except (requests.exceptions.ProxyError,
-                requests.exceptions.ConnectTimeout,
-                requests.exceptions.ReadTimeout,
-                requests.exceptions.SSLError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.JSONDecodeError,
-                requests.exceptions.TooManyRedirects):
-            if attempt < retries - 1:
-                time.sleep(0.5)  # 短暂等待后重试
-                continue
-            return proxy, False, None
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.5)
-                continue
-            return proxy, False, None
-    return proxy, False, None
+                if response.status_code == 200:
+                    origin_ip = response.json().get('origin', '')
+                    # 验证返回的IP是否与代理一致
+                    proxy_ip = proxy.split(':')[0]
+                    if proxy_ip in origin_ip:
+                        detected_type = current_protocol
+                        return proxy, True, response_time, detected_type
+                    detected_type = current_protocol
+                    return proxy, True, response_time, detected_type
+                    
+            except Exception as e:
+                if attempt < retries - 1:
+                    time.sleep(0.5)
+                    continue
+                # 当前协议失败，如果是自动检测则尝试下一个协议
+                break
+                
+    # 如果是指定类型验证失败，返回指定类型（即使失败）
+    if proxy_type != "auto":
+        detected_type = proxy_type
+    
+    return proxy, False, None, detected_type
 
-def check_proxies_batch(proxies, test_url="http://httpbin.org/ip", timeout=TIMEOUT, max_workers=MAX_WORKERS, check_type="existing"):
+def check_proxies_batch(proxies, proxy_types, test_url="http://httpbin.org/ip", 
+                       timeout=TIMEOUT, max_workers=MAX_WORKERS, check_type="existing"):
     """
     批量检查代理IP列表
-
-    :param proxies: 代理IP列表或字典
-    :param test_url: 测试URL
-    :param timeout: 超时时间(秒)
-    :param max_workers: 最大线程数
-    :param check_type: "new"（新代理）或 "existing"（已有代理）
-    :return: 更新后的代理字典
+    
+    :param proxy_types: 代理类型字典
     """
     updated_proxies = {}
+    updated_types = {}
 
-    # 如果是新代理，使用两次重试
+    # 新代理验证两次，已有代理验证一次
     retries = 2 if check_type == "new" else 1
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_proxy = {
-            executor.submit(
+        future_to_proxy = {}
+        for proxy in proxies:
+            # 对于已有代理，使用文件中记录的类型；对于新代理，使用自动检测
+            if check_type == "existing" and proxy in proxy_types:
+                proxy_type = proxy_types[proxy]
+            else:
+                proxy_type = proxy_types.get(proxy, "auto")  # 从传入的类型字典获取
+                
+            future = executor.submit(
                 check_proxy,
                 proxy,
                 test_url,
                 timeout,
-                retries
-            ): proxy for proxy in proxies
-        }
+                retries,
+                proxy_type
+            )
+            future_to_proxy[future] = proxy
 
         for future in concurrent.futures.as_completed(future_to_proxy):
+            proxy = future_to_proxy[future]
             try:
-                proxy, is_valid, response_time = future.result()
+                proxy_addr, is_valid, response_time, detected_type = future.result()
 
-                # 验证成功
                 if is_valid and response_time is not None and response_time <= timeout:
-                    print(f"✅ 有效代理: {proxy} | 响应时间: {response_time:.2f}s")
+                    print(f"✅ 有效代理({detected_type}): {proxy} | 响应时间: {response_time:.2f}s")
                     if check_type == "new":
-                        # 新代理验证成功给98分（而不是满分）
                         updated_proxies[proxy] = 98
                     else:
-                        # 已有代理验证成功加1分（不超过最大分）
                         current_score = proxies.get(proxy, 0)
                         updated_proxies[proxy] = min(current_score + 1, MAX_SCORE)
+                    updated_types[proxy] = detected_type
                     
-                # 响应结果超过规定的'timeout',但至少不是None
                 elif response_time is not None:
                     print(f"❎ 超时代理: {proxy} | 响应时间: {response_time:.2f}s")
                     if check_type == "existing" and proxy in proxies:
-                        # 已有代理验证超时不改分
                         updated_proxies[proxy] = proxies[proxy]
                     else:
-                        # 新代理验证超时给80分
                         updated_proxies[proxy] = 80
+                    # 即使超时，也保留指定的类型
+                    updated_types[proxy] = proxy_types.get(proxy, detected_type)
 
-                # 响应结果为'None'时
                 else:
-                    print(f"❌ 无效代理: {proxy} | 响应结果: {response_time}")
+                    print(f"❌ 无效代理: {proxy}")
                     if check_type == "existing" and proxy in proxies:
-                        # 已有代理验证无效减1分（不低于0分）
                         updated_proxies[proxy] = max(0, proxies[proxy] - 1)
+                        updated_types[proxy] = proxy_types.get(proxy, "http")
                     else:
-                        # 新代理验证无效给0分
-                        updated_proxies[proxy] = 0 
-            except Exception as e:   # 一般在爬取部分就筛选完了,这是为了保险起见
-                print(f"❌ 错误代理: {proxy}")   
+                        updated_proxies[proxy] = 0
+                        updated_types[proxy] = proxy_types.get(proxy, "http")
+                        
+            except Exception as e:
+                print(f"❌ 错误代理: {proxy} - {str(e)}")
                 if check_type == "existing" and proxy in proxies:
-                    # 已有代理验证错误减1分（不低于0分）
                     updated_proxies[proxy] = max(0, proxies[proxy] - 1)
+                    updated_types[proxy] = proxy_types.get(proxy, "http")
                 else:
-                    # 新代理验证错误给0分
-                    updated_proxies[proxy] = 0  
-    return updated_proxies
+                    updated_proxies[proxy] = 0
+                    updated_types[proxy] = proxy_types.get(proxy, "http")
+                    
+    return updated_proxies, updated_types
 
 def load_proxies_from_file(file_path):
-    """从CSV文件加载代理列表和分数"""
+    """从CSV文件加载代理列表、类型和分数"""
     proxies = {}
+    proxy_types = {}
+    
     if not os.path.exists(file_path):
-        return proxies
+        return proxies, proxy_types
 
     with open(file_path, 'r', encoding="utf-8") as file:
         reader = csv.reader(file)
         for row in reader:
-            if len(row) >= 2:
+            if len(row) >= 3:
+                # 新格式：类型,proxy:port,分数
+                proxy_type = row[0].strip().lower()
+                proxy = row[1].strip()
+                try:
+                    score = int(row[2])
+                    proxies[proxy] = score
+                    proxy_types[proxy] = proxy_type
+                except:
+                    # 如果解析失败，使用默认值
+                    proxies[proxy] = 70
+                    proxy_types[proxy] = "http"  # 默认HTTP
+            elif len(row) >= 2:
+                # 旧格式兼容：proxy:port,分数（默认HTTP类型）
                 proxy = row[0].strip()
                 try:
                     score = int(row[1])
                     proxies[proxy] = score
+                    proxy_types[proxy] = "http"  # 旧文件默认HTTP
                 except:
-                    # 如果分数解析失败，使用默认值
                     proxies[proxy] = 70
-    return proxies
+                    proxy_types[proxy] = "http"
+    
+    return proxies, proxy_types
 
-def save_valid_proxies(proxies, file_path):
-    """保存有效代理到CSV文件（带分数）"""
-    # 确保目录存在
+def save_valid_proxies(proxies, proxy_types, file_path):
+    """保存有效代理到CSV文件（带类型和分数）"""
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     
     with open(file_path, 'w', encoding="utf-8", newline='') as file:
         writer = csv.writer(file)
         for proxy, score in proxies.items():
-            if len(f'{proxy}:{score}') > 6:   # 去掉错误的长度不够的代理
-                if score > 0:  # 只保存分数大于0的代理
-                    writer.writerow([proxy, score])
+            if len(proxy) > 6 and score > 0:  # 基本验证
+                proxy_type = proxy_types.get(proxy, "http")  # 默认HTTP
+                writer.writerow([proxy_type, proxy, score])
 
 def update_proxy_scores(file_path):
     """更新代理分数文件，移除0分代理"""
-    proxies = load_proxies_from_file(file_path)
+    proxies, proxy_types = load_proxies_from_file(file_path)
     valid_proxies = {k: v for k, v in proxies.items() if v > 0}
-    save_valid_proxies(valid_proxies, file_path)
+    valid_types = {k: v for k, v in proxy_types.items() if k in valid_proxies}
+    save_valid_proxies(valid_proxies, valid_types, file_path)
     return len(proxies) - len(valid_proxies)
-
-def extract_proxies(num):
-    """
-    提取指定数量的代理，优先提取分高的
-
-    :param num: 要提取的代理数量
-    :return: 代理列表
-    """
-    proxies = load_proxies_from_file(OUTPUT_FILE)
-
-    # 按分数降序排序
-    sorted_proxies = sorted(proxies.items(), key=lambda x: x[1], reverse=True)
-
-    # 提取代理
-    result = []
-    for proxy, score in sorted_proxies:
-        if len(result) >= num:
-            break
-        result.append(proxy)
-
-    return result
 
 def filter_proxies(all_proxies):
         """
@@ -296,7 +311,7 @@ def filter_proxies(all_proxies):
         with open(OUTPUT_FILE,'r') as file:
             csv_reader  = csv.reader(file)
             for row in csv_reader:
-                existing_proxies.append(row[0])
+                existing_proxies.append(row[1])
 
         new_proxies = []
         duplicate_count = 0
@@ -307,7 +322,7 @@ def filter_proxies(all_proxies):
                 if proxy in existing_proxies:
                     print(f'⭕️ 已有代理: {proxy}')
                     duplicate_count += 1
-                elif ':' in proxy:
+                elif (':' in proxy) and (proxy not in new_proxies):
                     new_proxies.append(proxy)
                 else:
                     print(f'❌ 格式无效: {proxy}')
@@ -319,68 +334,162 @@ def filter_proxies(all_proxies):
         return new_proxies
 
 def validate_new_proxies(new_proxies):
-    """验证新代理"""
+    """验证新代理（自动检测类型)"""
     if not new_proxies:
         print("没有代理需要验证")
         return
 
-    print(f"共加载 {len(new_proxies)} 个新代理，开始测试...")
-    updated_proxies = check_proxies_batch(new_proxies, TEST_URL, TIMEOUT, MAX_WORKERS, check_type="new")
-
-    # 保留所有验证结果（包括98分和80分的代理）
-    # valid_new_proxies = {k: v for k, v in updated_proxies.items() if v == 98}  # 原代码，只保留98分
-    valid_new_proxies = updated_proxies  # 修改后，保留所有分数
+    print(f"共加载 {len(new_proxies)} 个新代理，开始自动检测类型并测试...")
+    
+    # 新代理初始分数为0，类型为auto（自动检测）
+    new_proxies_dict = {proxy: 0 for proxy in new_proxies}
+    new_types_dict = {proxy: "auto" for proxy in new_proxies}
+    
+    updated_proxies, updated_types = check_proxies_batch(
+        new_proxies_dict, new_types_dict, TEST_URL, TIMEOUT, 
+        MAX_WORKERS, check_type="new"
+    )
 
     # 合并到现有代理池
-    existing_proxies = load_proxies_from_file(OUTPUT_FILE)
-    for proxy, score in valid_new_proxies.items():
-        # 只添加新代理或更新分数（取最高分）
+    existing_proxies, existing_types = load_proxies_from_file(OUTPUT_FILE)
+    for proxy, score in updated_proxies.items():
         if proxy not in existing_proxies or existing_proxies[proxy] < score:
             existing_proxies[proxy] = score
+            existing_types[proxy] = updated_types[proxy]
 
-    save_valid_proxies(existing_proxies, OUTPUT_FILE)
+    save_valid_proxies(existing_proxies, existing_types, OUTPUT_FILE)
 
-    # 统计验证结果
-    success_count = sum(1 for score in valid_new_proxies.values() if score == 98)
+    # 统计结果（按类型）
+    success_by_type = {}
+    timeout_by_type = {}
+    total_by_type = {}
+    
+    for proxy, score in updated_proxies.items():
+        proxy_type = updated_types.get(proxy, "unknown")
+        if proxy_type not in total_by_type:
+            total_by_type[proxy_type] = 0
+            success_by_type[proxy_type] = 0
+            timeout_by_type[proxy_type] = 0
+            
+        total_by_type[proxy_type] += 1
+        if score == 98:
+            success_by_type[proxy_type] += 1
+        elif score == 80:
+            timeout_by_type[proxy_type] += 1
 
-    timeout_count = sum(1 for score in valid_new_proxies.values() if score == 80)
+    print('\n验证完成!')
+    print("类型统计:")
+    for proxy_type in total_by_type:
+        total = total_by_type[proxy_type]
+        success = success_by_type.get(proxy_type, 0)
+        timeout = timeout_by_type.get(proxy_type, 0)
+        if proxy_type in ['auto', 'unknown']:
+            print(f"失败数{total}/总数{len(new_proxies)}")
+        else:
+            print(f"  {proxy_type}: 成功{success}/超时{timeout}/总数{len(new_proxies)}")
+    
+    overall_success = sum(1 for score in updated_proxies.values() if score == 98)
+    overall_timeout = sum(1 for score in updated_proxies.values() if score == 80)
+    
+    print(f"\n总体统计:")
+    print(f"新代理成功: {overall_success}/{len(new_proxies)}")
+    print(f"新代理超时: {overall_timeout}/{len(new_proxies)}")
+    print(f"代理池已更新至: {OUTPUT_FILE}")
 
-    print('\n验证完成!' )
-    print(f"新代理成功: {success_count}/{len(new_proxies)}")
-    print(f"新代理超时：{timeout_count}/{len(new_proxies)}")
+def validate_new_proxies_with_type(new_proxies, proxy_type="auto"):
+    """使用指定类型验证新代理"""
+    if not new_proxies:
+        print("没有代理需要验证")
+        return
 
+    print(f"共加载 {len(new_proxies)} 个新代理，使用{proxy_type}类型开始测试...")
+    
+    # 新代理初始分数为0
+    new_proxies_dict = {proxy: 0 for proxy in new_proxies}
+    new_types_dict = {proxy: proxy_type for proxy in new_proxies}
+    
+    updated_proxies, updated_types = check_proxies_batch(
+        new_proxies_dict, new_types_dict, TEST_URL, TIMEOUT, 
+        MAX_WORKERS, check_type="new"
+    )
+
+    # 合并到现有代理池
+    existing_proxies, existing_types = load_proxies_from_file(OUTPUT_FILE)
+    for proxy, score in updated_proxies.items():
+        if proxy not in existing_proxies or existing_proxies[proxy] < score:
+            existing_proxies[proxy] = score
+            existing_types[proxy] = updated_types[proxy]
+
+    save_valid_proxies(existing_proxies, existing_types, OUTPUT_FILE)
+
+    # 统计结果（按类型）
+    success_by_type = {}
+    timeout_by_type = {}
+    total_by_type = {}
+    
+    for proxy, score in updated_proxies.items():
+        proxy_type = updated_types.get(proxy, "unknown")
+        if proxy_type not in total_by_type:
+            total_by_type[proxy_type] = 0
+            success_by_type[proxy_type] = 0
+            timeout_by_type[proxy_type] = 0
+            
+        total_by_type[proxy_type] += 1
+        if score == 98:
+            success_by_type[proxy_type] += 1
+        elif score == 80:
+            timeout_by_type[proxy_type] += 1
+
+    print('\n验证完成!')
+    print("类型统计:")
+    for proxy_type in total_by_type:
+        total = total_by_type[proxy_type]
+        success = success_by_type.get(proxy_type, 0)
+        timeout = timeout_by_type.get(proxy_type, 0)
+        if proxy_type in ['auto', 'unknown']:
+            print(f"失败数{total}/总数{len(new_proxies)}")
+        else:
+            print(f"  {proxy_type}: 成功{success}/超时{timeout}/总数{len(new_proxies)}")
+    
+    overall_success = sum(1 for score in updated_proxies.values() if score == 98)
+    overall_timeout = sum(1 for score in updated_proxies.values() if score == 80)
+    
+    print(f"\n总体统计:")
+    print(f"新代理成功: {overall_success}/{len(new_proxies)}")
+    print(f"新代理超时: {overall_timeout}/{len(new_proxies)}")
     print(f"代理池已更新至: {OUTPUT_FILE}")
 
 def validate_existing_proxies():
     """验证已有代理池中的代理"""
     print(f"开始验证已有代理池，文件：{OUTPUT_FILE}...")
 
-    proxies = load_proxies_from_file(OUTPUT_FILE)
-
-    # 记录验证前的代理数量
+    proxies, proxy_types = load_proxies_from_file(OUTPUT_FILE)
     initial_count = len(proxies)
 
     if not proxies:
         print("代理池为空，请先添加代理")
         return
 
-    print(f"共加载 {len(proxies)} 个代理，开始测试...")
-    updated_proxies = check_proxies_batch(proxies, TEST_URL, TIMEOUT, MAX_WORKERS, "existing")
+    print(f"共加载 {initial_count} 个代理，开始测试...")
+    updated_proxies, updated_types = check_proxies_batch(
+        proxies, proxy_types, TEST_URL, TIMEOUT, MAX_WORKERS, "existing"
+    )
 
     # 保存更新后的代理池
-    save_valid_proxies(updated_proxies, OUTPUT_FILE)
+    save_valid_proxies(updated_proxies, updated_types, OUTPUT_FILE)
 
     # 清理0分代理
     removed_count = update_proxy_scores(OUTPUT_FILE)
 
-    # 记录验证后的代理数量
-    final_count = len(load_proxies_from_file(OUTPUT_FILE))
+    # 最终统计
+    final_proxies, _ = load_proxies_from_file(OUTPUT_FILE)
+    final_count = len(final_proxies)
 
     print(f"\n验证完成! 剩余有效代理: {final_count}/{initial_count}")
-    print(f"代理分数已更新，已移除 {initial_count - final_count} 个无效代理")
+    print(f"已移除 {initial_count - final_count} 个无效代理")
 
 def crawl_proxies():
-    """爬取免费代理 - 仅供学习参考"""
+    """爬取免费代理"""
     print("""已创建的可爬网站
     1：https://proxy5.net/cn/free-proxy/china   -被封了,但代理质量很高
     2：https://www.89ip.cn/   -240个,但大多数不能用
@@ -619,15 +728,61 @@ def crawl_proxies():
     
     return filter_proxies(all_proxies)   # 返回筛选后的代理列表
 
+def extract_proxies_by_type(num, proxy_type="all"):
+    """
+    按类型提取指定数量的代理，优先提取分高的
+    
+    :param num: 数量
+    :param proxy_type: 代理类型 - "http", "socks4", "socks5", "all"
+    :return: 代理列表
+    """
+    proxies, proxy_types = load_proxies_from_file(OUTPUT_FILE)
+    
+    # 按类型筛选
+    if proxy_type != "all":
+        filtered_proxies = {k: v for k, v in proxies.items() 
+                          if proxy_types.get(k) == proxy_type}
+    else:
+        filtered_proxies = proxies
+
+    # 按分数降序排序
+    sorted_proxies = sorted(filtered_proxies.items(), key=lambda x: x[1], reverse=True)
+
+    result = []
+    for proxy, score in sorted_proxies:
+        if len(result) >= num:
+            break
+        actual_type = proxy_types.get(proxy, "http")
+        result.append(f"{actual_type}://{proxy}")
+
+    return result
+
 def extract_proxies_menu():
-    """提取代理菜单"""
+    """提取代理菜单（支持按类型筛选）"""
     try:
         count = int(input("请输入要提取的代理数量: "))
         if count <= 0:
             print("数量必须大于0")
             return
 
-        proxies = extract_proxies(count)
+        # 选择代理类型
+        print("\n选择代理类型:")
+        print("1. http/https")
+        print("2. socks4")
+        print("3. socks5")
+        print("4. 全部类型")
+        type_choice = input("请选择(1-4): ").strip()
+        
+        type_map = {
+            "1": "http",
+            "2": "socks4", 
+            "3": "socks5",
+            "4": "all"
+        }
+        
+        proxy_type = type_map.get(type_choice, "all")
+        
+        proxies = extract_proxies_by_type(count, proxy_type)
         if not proxies:
             print("代理池中没有可用代理")
             return
@@ -635,7 +790,7 @@ def extract_proxies_menu():
         if len(proxies) < count:
             print(f"⚠️ 警告: 只有 {len(proxies)} 个可用代理，少于请求的 {count} 个")
 
-        print("\n提取的代理列表:")
+        print(f"\n提取的代理列表({proxy_type}):")
         for i, proxy in enumerate(proxies, 1):
             print(f"{i}. {proxy}")
 
@@ -649,7 +804,115 @@ def extract_proxies_menu():
     except ValueError:
         print("请输入有效的数字")
 
+def show_proxy_pool_status():
+    """显示代理池状态（按类型和分数统计）"""
+    proxies, proxy_types = load_proxies_from_file(OUTPUT_FILE)
+    total = len(proxies)
+    
+    if total == 0:
+        print("代理池为空")
+        return
+
+    # 按类型分组
+    type_groups = {}
+    for proxy, score in proxies.items():
+        proxy_type = proxy_types.get(proxy, "http")
+        if proxy_type not in type_groups:
+            type_groups[proxy_type] = []
+        type_groups[proxy_type].append((proxy, score))
+
+    print(f"\n代理池状态 ({OUTPUT_FILE}):")
+    print(f"总代理数量: {total}")
+    
+    # 按类型显示统计
+    for proxy_type, proxy_list in type_groups.items():
+        type_count = len(proxy_list)
+        print(f"\n{proxy_type.upper()} 代理: {type_count}个")
+        
+        # 统计分数分布
+        score_count = {}
+        for _, score in proxy_list:
+            score_count[score] = score_count.get(score, 0) + 1
+        
+        # 按分数排序显示
+        sorted_scores = sorted(score_count.items(), key=lambda x: x[0], reverse=True)
+        for score, count in sorted_scores:
+            print(f"  {score}分: {count}个")
+        
+        # 显示该类型中分数最高的3个代理
+        # top_proxies = sorted(proxy_list, key=lambda x: x[1], reverse=True)[:3]
+        # print(f"  最高分代理:")
+        # for i, (proxy, score) in enumerate(top_proxies, 1):
+        #     print(f"    {i}. {proxy} - {score}分")
+
+    print('='*40)
+    print(f'总计: {total} 个代理')
+
+def load_from_csv_with_type():
+    """从CSV文件加载并验证代理（支持类型选择）"""
+    try:
+        filename = input('文件名(路径): ')
+        if not os.path.exists(filename):
+            print("文件不存在")
+            return
+            
+        # 选择代理类型
+        print("\n选择代理类型:")
+        print("1. http/https")
+        print("2. socks4")
+        print("3. socks5")
+        print("4. 自动检测")
+        type_choice = input("请选择(1-3): ").strip()
+        
+        type_map = {
+            "1": "http",
+            "2": "socks4",
+            "3": "socks5",
+            "4": "auto"
+        }
+        
+        selected_type = type_map.get(type_choice, "http")
+        print(f"使用类型: {selected_type}")
+        
+        data = []
+        with open(filename, 'r', encoding='utf-8') as file:
+            reader = csv.reader(file)
+            for row in reader:
+                if len(row) >= 2:
+                    # 支持 ip,port 格式
+                    ip = row[0].strip()
+                    port = row[1].strip()
+                    if ip and port:
+                        data.append(f"{ip}:{port}")
+                elif len(row) == 1 and ':' in row[0]:
+                    # 支持 ip:port 格式
+                    data.append(row[0].strip())
+        
+        if not data:
+            print("文件中没有找到有效的代理")
+            return
+            
+        print(f"从文件加载了 {len(data)} 个代理")
+        
+        # 筛选去重
+        new_proxies = filter_proxies(data)
+        
+        if new_proxies:
+            if type_choice != 4:
+                # 使用指定类型验证
+                validate_new_proxies_with_type(new_proxies, selected_type)
+            else:
+                # 使用自动检测
+                validate_new_proxies(new_proxies)
+        else:
+            print("没有新代理需要验证")
+            
+    except Exception as e:
+        print(f'出错了: {str(e)}')
+
+
 if __name__ == '__main__':
+
     while True:
         print(f"""功能：
         1: 爬取并验证新代理 (添加到代理池)
@@ -671,49 +934,9 @@ if __name__ == '__main__':
         elif choice == "3":
             extract_proxies_menu()
         elif choice == "4":
-            proxies = load_proxies_from_file(OUTPUT_FILE)
-            total = len(proxies)
-            if total == 0:
-                print("代理池为空")
-            else:
-                # 统计不同分数的代理数量
-                score_count = {}
-                for score in proxies.values():
-                    score_count[score] = score_count.get(score, 0) + 1
-
-                # 按分数排序
-                sorted_scores = sorted(score_count.items(), key=lambda x: x[0], reverse=True)
-
-                print(f"\n代理池状态 ({OUTPUT_FILE}):")
-                print(f"总代理数量: {total}")
-                print("分数分布:")
-                for score, count in sorted_scores:
-                    print(f"  {score}分: {count}个代理")
-
-                # # 感觉下面这个功能没必要
-                # # 显示分数最高的10个代理
-                # top_proxies = sorted(proxies.items(), key=lambda x: x[1], reverse=True)[:10]
-                # print("\n分数最高的10个代理:")
-                # for i, (proxy, score) in enumerate(top_proxies, 1):
-                #     print(f"{i}. {proxy} - {score}分")
-                print('='*20)
-                print(f'共 {total} 个代理')   # TTY不能上滚终端,将主要数据在下方显示一遍 
+            show_proxy_pool_status()
         elif choice == '5':
-            try:
-                filename = input('文件名(路径):')
-                data = []
-
-                with open(filename,'r') as file:
-                    reader = csv.reader(file)
-                    for row in reader:
-                        data.extend(row)
-                        
-                all_proxies = [f"{data[i].strip()}:{data[i + 1].strip()}" for i in range(0, len(data), 2)]
-                new_proxies = filter_proxies(all_proxies)   # 去掉重复的,错误的
-                validate_new_proxies(new_proxies)
-
-            except:
-                print('出错了')
+            load_from_csv_with_type()
         
         else:
             print('退出')
